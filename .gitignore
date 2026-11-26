@@ -1,0 +1,4 @@
+bin/
+*.zip
+airgapbridge.config.json
+airgapbridge-qa-rules.json
