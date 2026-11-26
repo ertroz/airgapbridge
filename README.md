@@ -21,14 +21,11 @@ Built with **pure Go standard library** (zero external dependencies).
 ## Installation
 
 ### Option 1: Quick Install via `curl` (Recommended — No Go Required)
-
-After publishing the release assets from `./bin/` to GitHub Releases (replace `<owner>/<repo>` and `<tag>`, e.g. `v1.0.0`):
-
 #### macOS (Apple Silicon & Intel) — Raw Binary
 ```bash
 case "$(uname -m)" in arm64|aarch64) ARCH=arm64;; *) ARCH=amd64;; esac
 curl -fsSL -o airgapbridge \
-  "https://github.com/<owner>/<repo>/releases/download/<tag>/airgapbridge-darwin-${ARCH}"
+  "https://github.com/ertroz/airgapbridge/releases/download/v1.0/airgapbridge-darwin-${ARCH}"
 chmod +x airgapbridge
 sudo mv airgapbridge /usr/local/bin/airgapbridge
 airgapbridge --help
@@ -38,7 +35,7 @@ airgapbridge --help
 ```bash
 case "$(uname -m)" in arm64|aarch64) ARCH=arm64;; *) ARCH=amd64;; esac
 curl -fsSL -o airgapbridge.zip \
-  "https://github.com/<owner>/<repo>/releases/download/<tag>/airgapbridge-darwin-${ARCH}.zip"
+  "https://github.com/ertroz/airgapbridge/releases/download/v1.0/airgapbridge-darwin-${ARCH}.zip"
 unzip -o airgapbridge.zip
 chmod +x airgapbridge
 sudo mv airgapbridge /usr/local/bin/airgapbridge
@@ -49,7 +46,7 @@ airgapbridge --help
 #### Linux (amd64)
 ```bash
 curl -fsSL -o airgapbridge.zip \
-  "https://github.com/<owner>/<repo>/releases/download/<tag>/airgapbridge-linux-amd64.zip"
+  "https://github.com/ertroz/airgapbridge/releases/download/v1.0/airgapbridge-linux-amd64.zip"
 unzip -o airgapbridge.zip
 chmod +x airgapbridge
 sudo mv airgapbridge /usr/local/bin/airgapbridge
@@ -59,7 +56,7 @@ airgapbridge --help
 
 #### Windows (PowerShell)
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/<owner>/<repo>/releases/download/<tag>/airgapbridge-windows-amd64.zip" -OutFile "airgapbridge.zip"
+Invoke-WebRequest -Uri "https://github.com/ertroz/airgapbridge/releases/download/v1.0/airgapbridge-windows-amd64.zip" -OutFile "airgapbridge.zip"
 Expand-Archive -Path "airgapbridge.zip" -DestinationPath "$env:USERPROFILE\bin" -Force
 Remove-Item "airgapbridge.zip"
 ```
