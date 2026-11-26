@@ -1,0 +1,64 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Build cross-platform binaries and zips
+        run: |
+          mkdir -p dist stage
+
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/airgapbridge-linux-amd64 ./cmd/airgapbridge
+          cp dist/airgapbridge-linux-amd64 stage/airgapbridge
+          (cd stage && zip -q ../dist/airgapbridge-linux-amd64.zip airgapbridge)
+          rm -f stage/airgapbridge
+
+          # macOS arm64 (Apple Silicon)
+          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/airgapbridge-darwin-arm64 ./cmd/airgapbridge
+          cp dist/airgapbridge-darwin-arm64 stage/airgapbridge
+          (cd stage && zip -q ../dist/airgapbridge-darwin-arm64.zip airgapbridge)
+          rm -f stage/airgapbridge
+
+          # macOS amd64 (Intel)
+          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/airgapbridge-darwin-amd64 ./cmd/airgapbridge
+          cp dist/airgapbridge-darwin-amd64 stage/airgapbridge
+          (cd stage && zip -q ../dist/airgapbridge-darwin-amd64.zip airgapbridge)
+          rm -f stage/airgapbridge
+
+          # Windows amd64
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/airgapbridge-windows-amd64.exe ./cmd/airgapbridge
+          cp dist/airgapbridge-windows-amd64.exe stage/airgapbridge.exe
+          (cd stage && zip -q ../dist/airgapbridge-windows-amd64.zip airgapbridge.exe)
+          rm -f stage/airgapbridge.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/airgapbridge-linux-amd64
+            dist/airgapbridge-linux-amd64.zip
+            dist/airgapbridge-darwin-arm64
+            dist/airgapbridge-darwin-arm64.zip
+            dist/airgapbridge-darwin-amd64
+            dist/airgapbridge-darwin-amd64.zip
+            dist/airgapbridge-windows-amd64.exe
+            dist/airgapbridge-windows-amd64.zip
