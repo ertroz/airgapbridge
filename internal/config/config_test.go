@@ -45,13 +45,37 @@ func TestRunInitWizardAndLoad(t *testing.T) {
 	if cfg.SitURL != "https://sit-app.company.com" || cfg.LocalPort != 5173 || cfg.DevCommand != "pnpm dev" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
+	if cfg.QAPort != 4173 || cfg.BuildCommand != "pnpm build" || cfg.QACommand != "pnpm preview" {
+		t.Fatalf("unexpected QA build config: %+v", cfg)
+	}
 
 	loaded, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if loaded.SitURL != cfg.SitURL || loaded.LocalPort != cfg.LocalPort || loaded.ProxyPort != DefaultProxyPort {
+	if loaded.SitURL != cfg.SitURL || loaded.LocalPort != cfg.LocalPort || loaded.ProxyPort != DefaultProxyPort || loaded.QAPort != 4173 {
 		t.Fatalf("unexpected loaded config: %+v", loaded)
+	}
+}
+
+func TestLoadDefaultsForLegacyConfig(t *testing.T) {
+	nextDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(nextDir, "bun.lock"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nextDir, "package.json"), []byte(`{"dependencies":{"next":"15.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"sitUrl":"https://sit-app.company.com","localPort":3000,"devCommand":"bun run dev"}`
+	if err := os.WriteFile(filepath.Join(nextDir, ConfigFilename), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(nextDir)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.QAPort != 3000 || cfg.BuildCommand != "bun run build" || cfg.QACommand != "bun run start" {
+		t.Fatalf("unexpected legacy Next.js QA defaults: %+v", cfg)
 	}
 }
 

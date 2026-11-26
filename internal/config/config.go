@@ -18,6 +18,7 @@ import (
 const (
 	ConfigFilename   = "airgapbridge.config.json"
 	DefaultProxyPort = 8899
+	DefaultViteQAPort = 4173
 )
 
 var DefaultBypassPaths = []string{"^/api/auth/.*", "^/login/callback.*"}
@@ -34,6 +35,9 @@ type Config struct {
 	SitURL         string   `json:"sitUrl"`
 	LocalPort      int      `json:"localPort"`
 	DevCommand     string   `json:"devCommand"`
+	QAPort         int      `json:"qaPort,omitempty"`
+	BuildCommand   string   `json:"buildCommand,omitempty"`
+	QACommand      string   `json:"qaCommand,omitempty"`
 	BypassPaths    []string `json:"bypassPaths"`
 	TunnelProvider string   `json:"tunnelProvider"`
 	ProxyPort      int      `json:"proxyPort,omitempty"`
@@ -41,12 +45,15 @@ type Config struct {
 }
 
 type InitOptions struct {
-	SitURL     string
-	Port       int
-	PM         string
-	DevCommand string
-	Bypass     string
-	Yes        bool
+	SitURL       string
+	Port         int
+	QAPort       int
+	PM           string
+	DevCommand   string
+	BuildCommand string
+	QACommand    string
+	Bypass       string
+	Yes          bool
 }
 
 func NormalizeSitURL(raw string) (string, error) {
@@ -93,9 +100,31 @@ func DetectFramework(cwd string) (Framework, int) {
 	return FrameworkUnknown, 3000
 }
 
+func DefaultQAPort(fw Framework, fallbackPort int) int {
+	switch fw {
+	case FrameworkNextJS:
+		return 3000
+	case FrameworkVite:
+		return DefaultViteQAPort
+	default:
+		if fallbackPort > 0 {
+			return fallbackPort
+		}
+		return 3000
+	}
+}
+
+func DefaultQACommand(p pm.PackageManager, fw Framework) string {
+	if fw == FrameworkVite {
+		return pm.DefaultPreviewCommand(p)
+	}
+	return pm.DefaultStartCommand(p)
+}
+
 var (
 	viteCorsRe         = regexp.MustCompile(`cors\s*:\s*true`)
 	viteAllowedHostsRe = regexp.MustCompile(`allowedHosts\s*:`)
+	vitePreviewRe      = regexp.MustCompile(`preview\s*:\s*\{`)
 )
 
 func CheckFrameworkCompatibility(cwd, sitURL string) {
@@ -148,6 +177,38 @@ func CheckFrameworkCompatibility(cwd, sitURL string) {
 	}
 }
 
+func CheckQABuildCompatibility(cwd, sitURL string) {
+	fw, _ := DetectFramework(cwd)
+	if fw != FrameworkVite {
+		return
+	}
+	sitHost := "sit-app.company.com"
+	if norm, err := NormalizeSitURL(sitURL); err == nil {
+		if u, err := url.Parse(norm); err == nil && u.Hostname() != "" {
+			sitHost = u.Hostname()
+		}
+	}
+	for _, name := range []string{"vite.config.ts", "vite.config.mts", "vite.config.js", "vite.config.mjs"} {
+		p := filepath.Join(cwd, name)
+		data, err := os.ReadFile(p)
+		if err == nil {
+			content := string(data)
+			if !vitePreviewRe.MatchString(content) || !viteAllowedHostsRe.MatchString(content) {
+				fmt.Fprintf(os.Stderr,
+					"\n[airgapbridge] Warning: %s may block tunneled hosts in \"vite preview\" (Vite 6+).\n"+
+						"If Vite preview rejects requests from %s or *.trycloudflare.com, add:\n"+
+						"  preview: {\n"+
+						"    cors: true,\n"+
+						"    allowedHosts: true,\n"+
+						"  },\n\n",
+					name, sitHost,
+				)
+			}
+			return
+		}
+	}
+}
+
 func Load(cwd string) (*Config, error) {
 	p := filepath.Join(cwd, ConfigFilename)
 	data, err := os.ReadFile(p)
@@ -171,12 +232,23 @@ func Load(cwd string) (*Config, error) {
 	}
 	cfg.SitURL = normURL
 
+	fw, defPort := DetectFramework(cwd)
+	detectedPM := pm.DetectPackageManager(cwd)
+
 	if cfg.LocalPort <= 0 {
-		_, defPort := DetectFramework(cwd)
 		cfg.LocalPort = defPort
 	}
 	if strings.TrimSpace(cfg.DevCommand) == "" {
-		cfg.DevCommand = pm.DefaultDevCommand(pm.DetectPackageManager(cwd))
+		cfg.DevCommand = pm.DefaultDevCommand(detectedPM)
+	}
+	if cfg.QAPort <= 0 {
+		cfg.QAPort = DefaultQAPort(fw, cfg.LocalPort)
+	}
+	if strings.TrimSpace(cfg.BuildCommand) == "" {
+		cfg.BuildCommand = pm.DefaultBuildCommand(detectedPM)
+	}
+	if strings.TrimSpace(cfg.QACommand) == "" {
+		cfg.QACommand = DefaultQACommand(detectedPM, fw)
 	}
 	if cfg.BypassPaths == nil {
 		cfg.BypassPaths = append([]string{}, DefaultBypassPaths...)
@@ -218,10 +290,24 @@ func RunInitWizard(cwd string, opts InitOptions) (*Config, error) {
 		defCmd = pm.DefaultDevCommand(detectedPM)
 	}
 
+	buildCmd := opts.BuildCommand
+	if buildCmd == "" {
+		buildCmd = pm.DefaultBuildCommand(detectedPM)
+	}
+
+	qaCmd := opts.QACommand
+	if qaCmd == "" {
+		qaCmd = DefaultQACommand(detectedPM, fw)
+	}
+
 	sitURL := opts.SitURL
 	localPort := opts.Port
 	if localPort <= 0 {
 		localPort = defPort
+	}
+	qaPort := opts.QAPort
+	if qaPort <= 0 {
+		qaPort = DefaultQAPort(fw, localPort)
 	}
 	devCmd := defCmd
 	bypassPaths := append([]string{}, DefaultBypassPaths...)
@@ -251,6 +337,9 @@ func RunInitWizard(cwd string, opts InitOptions) (*Config, error) {
 				return nil, fmt.Errorf("invalid port %q", portAns)
 			}
 			localPort = p
+			if opts.QAPort <= 0 && fw == FrameworkUnknown {
+				qaPort = localPort
+			}
 		}
 
 		fmt.Printf("Local dev command (%s): ", devCmd)
@@ -258,6 +347,31 @@ func RunInitWizard(cwd string, opts InitOptions) (*Config, error) {
 		cmdAns = strings.TrimSpace(cmdAns)
 		if cmdAns != "" {
 			devCmd = cmdAns
+		}
+
+		fmt.Printf("QA build port (%d): ", qaPort)
+		qaPortAns, _ := reader.ReadString('\n')
+		qaPortAns = strings.TrimSpace(qaPortAns)
+		if qaPortAns != "" {
+			p, err := strconv.Atoi(qaPortAns)
+			if err != nil || p <= 0 || p > 65535 {
+				return nil, fmt.Errorf("invalid QA port %q", qaPortAns)
+			}
+			qaPort = p
+		}
+
+		fmt.Printf("QA build command (%s): ", buildCmd)
+		buildAns, _ := reader.ReadString('\n')
+		buildAns = strings.TrimSpace(buildAns)
+		if buildAns != "" {
+			buildCmd = buildAns
+		}
+
+		fmt.Printf("QA serve command (%s): ", qaCmd)
+		qaCmdAns, _ := reader.ReadString('\n')
+		qaCmdAns = strings.TrimSpace(qaCmdAns)
+		if qaCmdAns != "" {
+			qaCmd = qaCmdAns
 		}
 
 		fmt.Printf("Bypass path regexes, comma-separated (%s): ", strings.Join(DefaultBypassPaths, ", "))
@@ -279,6 +393,9 @@ func RunInitWizard(cwd string, opts InitOptions) (*Config, error) {
 		SitURL:         normURL,
 		LocalPort:      localPort,
 		DevCommand:     devCmd,
+		QAPort:         qaPort,
+		BuildCommand:   buildCmd,
+		QACommand:      qaCmd,
 		BypassPaths:    bypassPaths,
 		TunnelProvider: "cloudflared",
 	}

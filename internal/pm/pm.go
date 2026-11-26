@@ -2,6 +2,7 @@ package pm
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -53,30 +55,71 @@ func DetectPackageManager(cwd string) PackageManager {
 	return Npm
 }
 
-func DefaultDevCommand(pm PackageManager) string {
+func DefaultScriptCommand(pm PackageManager, script string) string {
 	switch pm {
 	case Bun:
-		return "bun run dev"
+		return "bun run " + script
 	case Yarn:
-		return "yarn dev"
+		return "yarn " + script
 	case Pnpm:
-		return "pnpm dev"
+		return "pnpm " + script
 	default:
-		return "npm run dev"
+		return "npm run " + script
 	}
 }
 
+func DefaultDevCommand(pm PackageManager) string {
+	return DefaultScriptCommand(pm, "dev")
+}
+
+func DefaultBuildCommand(pm PackageManager) string {
+	return DefaultScriptCommand(pm, "build")
+}
+
+func DefaultStartCommand(pm PackageManager) string {
+	return DefaultScriptCommand(pm, "start")
+}
+
+func DefaultPreviewCommand(pm PackageManager) string {
+	return DefaultScriptCommand(pm, "preview")
+}
+
 func ResolveDevCommand(cwd, pmOverride, configCommand string) (string, error) {
+	return ResolveScriptCommand(cwd, pmOverride, "", configCommand, DefaultDevCommand)
+}
+
+func ResolveScriptCommand(cwd, pmOverride, flagCommand, configCommand string, defaultFn func(PackageManager) string) (string, error) {
+	if strings.TrimSpace(flagCommand) != "" {
+		return flagCommand, nil
+	}
 	if pmOverride != "" {
 		if !IsValidPackageManager(pmOverride) {
 			return "", fmt.Errorf("invalid package manager %q (supported: bun, npm, yarn, pnpm)", pmOverride)
 		}
-		return DefaultDevCommand(PackageManager(pmOverride)), nil
+		return defaultFn(PackageManager(pmOverride)), nil
 	}
 	if strings.TrimSpace(configCommand) != "" {
 		return configCommand, nil
 	}
-	return DefaultDevCommand(DetectPackageManager(cwd)), nil
+	return defaultFn(DetectPackageManager(cwd)), nil
+}
+
+func AppendPortFlagIfDefaultPreview(command string, port int) string {
+	if port <= 0 {
+		return command
+	}
+	trimmed := strings.TrimSpace(command)
+	if strings.Contains(trimmed, "--port") || strings.Contains(trimmed, " -p ") {
+		return command
+	}
+	switch trimmed {
+	case "npm run preview":
+		return fmt.Sprintf("npm run preview -- --port %d", port)
+	case "pnpm preview", "yarn preview", "bun run preview":
+		return fmt.Sprintf("%s --port %d", trimmed, port)
+	default:
+		return command
+	}
 }
 
 func IsPortListening(port int) bool {
@@ -103,20 +146,16 @@ func WaitForPort(port int, timeout time.Duration, exitCh <-chan error) error {
 		select {
 		case err := <-exitCh:
 			if err != nil {
-				return fmt.Errorf("dev server exited prematurely: %w", err)
+				return fmt.Errorf("server exited prematurely: %w", err)
 			}
-			return errors.New("dev server exited prematurely before port became ready")
+			return errors.New("server exited prematurely before port became ready")
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("timed out waiting for dev server on port %d", port)
+	return fmt.Errorf("timed out waiting for server on port %d", port)
 }
 
-func SpawnDevServer(command, cwd string) (*exec.Cmd, <-chan error, error) {
-	return SpawnDevServerWithOptions(command, cwd, false)
-}
-
-func SpawnDevServerWithOptions(command, cwd string, interactive bool) (*exec.Cmd, <-chan error, error) {
+func RunBuild(ctx context.Context, command, cwd string, interactive bool) error {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", "/C", command)
@@ -124,6 +163,97 @@ func SpawnDevServerWithOptions(command, cwd string, interactive bool) (*exec.Cmd
 		cmd = exec.Command("sh", "-c", command)
 	}
 	cmd.Dir = cwd
+	if !interactive {
+		configureProcessGroup(cmd)
+	}
+
+	if interactive {
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+
+		exitCh := make(chan error, 1)
+		go func() {
+			exitCh <- cmd.Wait()
+		}()
+
+		select {
+		case <-ctx.Done():
+			KillProcessTree(cmd)
+			<-exitCh
+			return ctx.Err()
+		case err := <-exitCh:
+			return err
+		}
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		pipePrefixed(stdout, os.Stdout, "[build]")
+	}()
+	go func() {
+		defer wg.Done()
+		pipePrefixed(stderr, os.Stderr, "[build]")
+	}()
+
+	exitCh := make(chan error, 1)
+	go func() {
+		wg.Wait()
+		exitCh <- cmd.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		KillProcessTree(cmd)
+		<-exitCh
+		return ctx.Err()
+	case err := <-exitCh:
+		return err
+	}
+}
+
+func SpawnDevServer(command, cwd string) (*exec.Cmd, <-chan error, error) {
+	return SpawnDevServerWithOptions(command, cwd, false)
+}
+
+func SpawnDevServerWithOptions(command, cwd string, interactive bool) (*exec.Cmd, <-chan error, error) {
+	return SpawnServerWithOptions(command, cwd, "[dev]", interactive)
+}
+
+func SpawnServerWithOptions(command, cwd, logPrefix string, interactive bool, extraEnv ...string) (*exec.Cmd, <-chan error, error) {
+	if logPrefix == "" {
+		logPrefix = "[dev]"
+	}
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/C", command)
+	} else {
+		cmd = exec.Command("sh", "-c", command)
+	}
+	cmd.Dir = cwd
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	if !interactive {
 		configureProcessGroup(cmd)
 	}
@@ -158,8 +288,8 @@ func SpawnDevServerWithOptions(command, cwd string, interactive bool) (*exec.Cmd
 		return nil, nil, err
 	}
 
-	go pipePrefixed(stdout, os.Stdout, "[dev]")
-	go pipePrefixed(stderr, os.Stderr, "[dev]")
+	go pipePrefixed(stdout, os.Stdout, logPrefix)
+	go pipePrefixed(stderr, os.Stderr, logPrefix)
 
 	exitCh := make(chan error, 1)
 	go func() {
