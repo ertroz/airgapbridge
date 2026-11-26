@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"airgapbridge/internal/config"
@@ -299,10 +300,39 @@ func StartCloudflaredTunnel(localPort int, timeout time.Duration, protocol ...st
 	urlCh := make(chan string, 1)
 	exitCh := make(chan error, 1)
 
+	var (
+		mu       sync.Mutex
+		logLines []string
+	)
+	appendLog := func(line string) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		logLines = append(logLines, trimmed)
+		if len(logLines) > 15 {
+			logLines = logLines[len(logLines)-15:]
+		}
+	}
+	recentLogs := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(logLines) == 0 {
+			return ""
+		}
+		return "\ncloudflared output:\n  " + strings.Join(logLines, "\n  ")
+	}
+
+	var scanWG sync.WaitGroup
+	scanWG.Add(2)
 	scanPipe := func(r io.Reader) {
+		defer scanWG.Done()
 		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
 			line := scanner.Text()
+			appendLog(line)
 			if m := tryCloudflareRe.FindString(line); m != "" {
 				select {
 				case urlCh <- m:
@@ -315,6 +345,7 @@ func StartCloudflaredTunnel(localPort int, timeout time.Duration, protocol ...st
 	go scanPipe(stdout)
 	go scanPipe(stderr)
 	go func() {
+		scanWG.Wait()
 		exitCh <- cmd.Wait()
 	}()
 
@@ -326,10 +357,10 @@ func StartCloudflaredTunnel(localPort int, timeout time.Duration, protocol ...st
 			ExitCh: exitCh,
 		}, nil
 	case err := <-exitCh:
-		return nil, fmt.Errorf("cloudflared exited unexpectedly: %v", err)
+		return nil, fmt.Errorf("cloudflared exited unexpectedly: %v%s", err, recentLogs())
 	case <-time.After(timeout):
 		pm.KillProcessTree(cmd)
-		return nil, fmt.Errorf("timed out waiting for cloudflared tunnel URL after %s", timeout)
+		return nil, fmt.Errorf("timed out waiting for cloudflared tunnel URL after %s%s", timeout, recentLogs())
 	}
 }
 

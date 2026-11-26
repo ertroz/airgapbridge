@@ -37,6 +37,7 @@ type Config struct {
 	BypassPaths    []string `json:"bypassPaths"`
 	TunnelProvider string   `json:"tunnelProvider"`
 	ProxyPort      int      `json:"proxyPort,omitempty"`
+	InteractiveDev bool     `json:"interactiveDev,omitempty"`
 }
 
 type InitOptions struct {

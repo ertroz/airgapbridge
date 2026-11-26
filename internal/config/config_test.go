@@ -54,3 +54,18 @@ func TestRunInitWizardAndLoad(t *testing.T) {
 		t.Fatalf("unexpected loaded config: %+v", loaded)
 	}
 }
+
+func TestLoadInteractiveDev(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"sitUrl":"https://sit-app.company.com","localPort":3000,"interactiveDev":true}`
+	if err := os.WriteFile(filepath.Join(dir, ConfigFilename), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.InteractiveDev {
+		t.Fatal("expected InteractiveDev to be true")
+	}
+}

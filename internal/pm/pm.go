@@ -113,6 +113,10 @@ func WaitForPort(port int, timeout time.Duration, exitCh <-chan error) error {
 }
 
 func SpawnDevServer(command, cwd string) (*exec.Cmd, <-chan error, error) {
+	return SpawnDevServerWithOptions(command, cwd, false)
+}
+
+func SpawnDevServerWithOptions(command, cwd string, interactive bool) (*exec.Cmd, <-chan error, error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", "/C", command)
@@ -120,7 +124,26 @@ func SpawnDevServer(command, cwd string) (*exec.Cmd, <-chan error, error) {
 		cmd = exec.Command("sh", "-c", command)
 	}
 	cmd.Dir = cwd
-	configureProcessGroup(cmd)
+	if !interactive {
+		configureProcessGroup(cmd)
+	}
+
+	if interactive {
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Start(); err != nil {
+			return nil, nil, err
+		}
+
+		exitCh := make(chan error, 1)
+		go func() {
+			exitCh <- cmd.Wait()
+		}()
+
+		return cmd, exitCh, nil
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

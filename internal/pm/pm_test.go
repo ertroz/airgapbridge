@@ -58,6 +58,20 @@ func TestResolveDevCommand(t *testing.T) {
 	}
 }
 
+func TestSpawnDevServerWithOptions(t *testing.T) {
+	dir := t.TempDir()
+	cmd, exitCh, err := SpawnDevServerWithOptions("echo ok", dir, false)
+	if err != nil {
+		t.Fatalf("SpawnDevServerWithOptions failed: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd")
+	}
+	if err := <-exitCh; err != nil {
+		t.Fatalf("expected clean exit, got %v", err)
+	}
+}
+
 func writeEmpty(t *testing.T, p string) {
 	t.Helper()
 	if err := os.WriteFile(p, []byte(""), 0o644); err != nil {
