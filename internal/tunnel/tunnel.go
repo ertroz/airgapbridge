@@ -47,20 +47,22 @@ type RequestlySource struct {
 }
 
 type RequestlyPair struct {
-	Destination string          `json:"destination"`
-	Source      RequestlySource `json:"source"`
+	DestinationType string          `json:"destinationType"`
+	Destination     string          `json:"destination"`
+	Source          RequestlySource `json:"source"`
 }
 
 type RequestlyRule struct {
-	CreationDate int64           `json:"creationDate"`
-	Description  string          `json:"description"`
-	GroupID      string          `json:"groupId"`
-	IsSample     bool            `json:"isSample"`
-	Name         string          `json:"name"`
-	ObjectType   string          `json:"objectType"`
-	Pairs        []RequestlyPair `json:"pairs"`
-	RuleType     string          `json:"ruleType"`
-	Status       string          `json:"status"`
+	CreationDate  int64           `json:"creationDate"`
+	Description   string          `json:"description"`
+	GroupID       string          `json:"groupId"`
+	IsSample      bool            `json:"isSample"`
+	Name          string          `json:"name"`
+	ObjectType    string          `json:"objectType"`
+	Pairs         []RequestlyPair `json:"pairs"`
+	RuleType      string          `json:"ruleType"`
+	SchemaVersion string          `json:"schemaVersion,omitempty"`
+	Status        string          `json:"status"`
 }
 
 func EscapeRegex(s string) string {
@@ -120,7 +122,8 @@ func GenerateRequestlyRules(sitURL, tunnelURL string, bypassPaths []string) ([]R
 			ObjectType:   "rule",
 			Pairs: []RequestlyPair{
 				{
-					Destination: fmt.Sprintf("%s/$1", cleanTunnel),
+					DestinationType: "url",
+					Destination:     fmt.Sprintf("%s/$1", cleanTunnel),
 					Source: RequestlySource{
 						Key:      "Url",
 						Operator: "Matches",
@@ -128,10 +131,100 @@ func GenerateRequestlyRules(sitURL, tunnelURL string, bypassPaths []string) ([]R
 					},
 				},
 			},
-			RuleType: "Redirect",
-			Status:   "Active",
+			RuleType:      "Redirect",
+			SchemaVersion: "3.0.0",
+			Status:        "Active",
 		},
 	}, nil
+}
+
+type HeaderEditorRule struct {
+	Enable     bool   `json:"enable"`
+	Name       string `json:"name"`
+	RuleType   string `json:"ruleType"`
+	MatchType  string `json:"matchType"`
+	Pattern    string `json:"pattern"`
+	Exclude    string `json:"exclude"`
+	Group      string `json:"group"`
+	IsFunction bool   `json:"isFunction"`
+	Action     string `json:"action"`
+	To         string `json:"to"`
+}
+
+type HeaderEditorExport struct {
+	Request       []HeaderEditorRule `json:"request"`
+	SendHeader    []any              `json:"sendHeader"`
+	ReceiveHeader []any              `json:"receiveHeader"`
+	ReceiveBody   []any              `json:"receiveBody"`
+}
+
+func GenerateHeaderEditorConfig(sitURL, tunnelURL string, bypassPaths []string) (*HeaderEditorExport, error) {
+	normSit, err := config.NormalizeSitURL(sitURL)
+	if err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(normSit)
+	if err != nil {
+		return nil, err
+	}
+	cleanTunnel := strings.TrimRight(tunnelURL, "/")
+	escapedSit := EscapeRegex(normSit)
+
+	cleaned := make([]string, 0, len(bypassPaths))
+	for _, p := range bypassPaths {
+		if norm := normalizeBypassPattern(p); norm != "" {
+			cleaned = append(cleaned, norm)
+		}
+	}
+
+	excludeRegex := ""
+	if len(cleaned) > 0 {
+		excludeRegex = fmt.Sprintf(`^%s\/(%s)`, escapedSit, strings.Join(cleaned, "|"))
+	}
+
+	return &HeaderEditorExport{
+		Request: []HeaderEditorRule{
+			{
+				Enable:     true,
+				Name:       fmt.Sprintf("AirgapBridge QA - %s", u.Host),
+				RuleType:   "redirect",
+				MatchType:  "regexp",
+				Pattern:    fmt.Sprintf(`^%s\/(.*)`, escapedSit),
+				Exclude:    excludeRegex,
+				Group:      "AirgapBridge QA",
+				IsFunction: false,
+				Action:     "redirect",
+				To:         fmt.Sprintf("%s/$1", cleanTunnel),
+			},
+		},
+		SendHeader:    []any{},
+		ReceiveHeader: []any{},
+		ReceiveBody:   []any{},
+	}, nil
+}
+
+func WriteHeaderEditorRulesFile(cwd, sitURL, tunnelURL string, bypassPaths []string, outputFile string) (string, error) {
+	if outputFile == "" {
+		outputFile = QARulesFilename
+	}
+	cfg, err := GenerateHeaderEditorConfig(sitURL, tunnelURL, bypassPaths)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+
+	outPath := outputFile
+	if !filepath.IsAbs(outPath) {
+		outPath = filepath.Join(cwd, outputFile)
+	}
+	if err := os.WriteFile(outPath, data, 0o644); err != nil {
+		return "", err
+	}
+	return outPath, nil
 }
 
 func WriteRequestlyRulesFile(cwd, sitURL, tunnelURL string, bypassPaths []string, outputFile string) (string, error) {
@@ -174,12 +267,22 @@ func EnsureCloudflaredInstalled() error {
 	return fmt.Errorf("\"cloudflared\" is not installed or not in PATH.\nInstall it to use \"airgapbridge qa\":\n%s", hint)
 }
 
-func StartCloudflaredTunnel(localPort int, timeout time.Duration) (*Instance, error) {
+func StartCloudflaredTunnel(localPort int, timeout time.Duration, protocol ...string) (*Instance, error) {
 	if err := EnsureCloudflaredInstalled(); err != nil {
 		return nil, err
 	}
 
-	cmd := exec.Command("cloudflared", "tunnel", "--url", fmt.Sprintf("http://localhost:%d", localPort))
+	proto := "http2"
+	if len(protocol) > 0 && strings.TrimSpace(protocol[0]) != "" {
+		proto = strings.TrimSpace(protocol[0])
+	}
+
+	args := []string{"tunnel", "--url", fmt.Sprintf("http://localhost:%d", localPort)}
+	if proto != "auto" {
+		args = []string{"tunnel", "--protocol", proto, "--url", fmt.Sprintf("http://localhost:%d", localPort)}
+	}
+
+	cmd := exec.Command("cloudflared", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err

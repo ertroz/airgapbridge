@@ -121,6 +121,8 @@ func runDev(args []string) error {
 	proxyPortFlag := fs.Int("proxy-port", 0, "Override local proxy port")
 	browserFlag := fs.String("browser", "", "Path to Chrome or Edge executable")
 	noBrowser := fs.Bool("no-browser", false, "Start proxy and dev server without launching a browser")
+	interactiveFlag := fs.Bool("interactive", false, "Attach terminal stdin/stdout to dev server (for password prompts like airgapvault)")
+	fs.BoolVar(interactiveFlag, "i", false, "Attach terminal stdin/stdout to dev server")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -144,6 +146,7 @@ func runDev(args []string) error {
 	if *proxyPortFlag > 0 {
 		proxyPort = *proxyPortFlag
 	}
+	interactive := cfg.InteractiveDev || *interactiveFlag
 
 	config.CheckFrameworkCompatibility(cwd, cfg.SitURL)
 
@@ -167,7 +170,7 @@ func runDev(args []string) error {
 	}
 	defer cleanup()
 
-	devCmd, err = ensureDevServerRunning(cwd, localPort, cfg.DevCommand, *pmFlag)
+	devCmd, err = ensureDevServerRunning(cwd, localPort, cfg.DevCommand, *pmFlag, interactive)
 	if err != nil {
 		return err
 	}
@@ -222,6 +225,10 @@ func runQA(args []string) error {
 	portFlag := fs.Int("port", 0, "Override local dev server port")
 	outputFile := fs.String("output", tunnel.QARulesFilename, "Output Requestly rules filename")
 	fs.StringVar(outputFile, "o", tunnel.QARulesFilename, "Output Requestly rules filename")
+	interactiveFlag := fs.Bool("interactive", false, "Attach terminal stdin/stdout to dev server (for password prompts like airgapvault)")
+	fs.BoolVar(interactiveFlag, "i", false, "Attach terminal stdin/stdout to dev server")
+	protocolFlag := fs.String("protocol", "http2", "Cloudflared transport protocol (http2 | quic | auto)")
+	formatFlag := fs.String("format", "header-editor", "QA rules output format (header-editor | requestly)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -241,6 +248,7 @@ func runQA(args []string) error {
 	if *portFlag > 0 {
 		localPort = *portFlag
 	}
+	interactive := cfg.InteractiveDev || *interactiveFlag
 
 	config.CheckFrameworkCompatibility(cwd, cfg.SitURL)
 
@@ -260,18 +268,26 @@ func runQA(args []string) error {
 	}
 	defer cleanup()
 
-	devCmd, err = ensureDevServerRunning(cwd, localPort, cfg.DevCommand, *pmFlag)
+	devCmd, err = ensureDevServerRunning(cwd, localPort, cfg.DevCommand, *pmFlag, interactive)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("[airgapbridge] Starting cloudflared tunnel to http://localhost:%d...\n", localPort)
-	tunInst, err = tunnel.StartCloudflaredTunnel(localPort, 30*time.Second)
+	fmt.Printf("[airgapbridge] Starting cloudflared tunnel (%s) to http://localhost:%d...\n", *protocolFlag, localPort)
+	tunInst, err = tunnel.StartCloudflaredTunnel(localPort, 30*time.Second, *protocolFlag)
 	if err != nil {
 		return err
 	}
 
-	rulesPath, err := tunnel.WriteRequestlyRulesFile(cwd, cfg.SitURL, tunInst.URL, cfg.BypassPaths, *outputFile)
+	var rulesPath string
+	switch *formatFlag {
+	case "header-editor":
+		rulesPath, err = tunnel.WriteHeaderEditorRulesFile(cwd, cfg.SitURL, tunInst.URL, cfg.BypassPaths, *outputFile)
+	case "requestly":
+		rulesPath, err = tunnel.WriteRequestlyRulesFile(cwd, cfg.SitURL, tunInst.URL, cfg.BypassPaths, *outputFile)
+	default:
+		return fmt.Errorf("invalid --format %q (supported: header-editor, requestly)", *formatFlag)
+	}
 	if err != nil {
 		return err
 	}
@@ -282,16 +298,21 @@ func runQA(args []string) error {
 		copiedSuffix = " (copied to clipboard!)"
 	}
 
+	extName := "Header Editor"
+	if *formatFlag == "requestly" {
+		extName = "Requestly"
+	}
+
 	fmt.Println("\n============================================================")
 	fmt.Println("  AirgapBridge QA Tunnel Ready")
 	fmt.Println("============================================================")
-	fmt.Printf("  Tunnel URL:     %s%s\n", tunInst.URL, copiedSuffix)
-	fmt.Printf("  SIT Domain:     %s\n", cfg.SitURL)
-	fmt.Printf("  Requestly File: %s\n", filepath.Base(rulesPath))
+	fmt.Printf("  Tunnel URL:  %s%s\n", tunInst.URL, copiedSuffix)
+	fmt.Printf("  SIT Domain:  %s\n", cfg.SitURL)
+	fmt.Printf("  Rules File:  %s (%s)\n", filepath.Base(rulesPath), extName)
 	fmt.Println("")
 	fmt.Println("  Share with QA:")
 	fmt.Printf("  1. Send %q to your QA engineer.\n", filepath.Base(rulesPath))
-	fmt.Println("  2. QA imports it into Requestly (Redirect Rule).")
+	fmt.Printf("  2. QA imports it into %s (Export & Import -> Import).\n", extName)
 	fmt.Printf("  3. QA opens %s, signs in via Entra ID SSO,\n", cfg.SitURL)
 	fmt.Println("     and tests your local build seamlessly.")
 	fmt.Println("============================================================")
@@ -311,7 +332,7 @@ func runQA(args []string) error {
 	return nil
 }
 
-func ensureDevServerRunning(cwd string, localPort int, configCmd, pmOverride string) (*exec.Cmd, error) {
+func ensureDevServerRunning(cwd string, localPort int, configCmd, pmOverride string, interactive bool) (*exec.Cmd, error) {
 	if pm.IsPortListening(localPort) {
 		fmt.Printf("[airgapbridge] Dev server already listening on port %d.\n", localPort)
 		return nil, nil
@@ -323,12 +344,17 @@ func ensureDevServerRunning(cwd string, localPort int, configCmd, pmOverride str
 	}
 
 	fmt.Printf("[airgapbridge] Starting local dev server (%s)...\n", resolvedCmd)
-	cmd, exitCh, err := pm.SpawnDevServer(resolvedCmd, cwd)
+	cmd, exitCh, err := pm.SpawnDevServerWithOptions(resolvedCmd, cwd, interactive)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := pm.WaitForPort(localPort, 45*time.Second, exitCh); err != nil {
+	timeout := 45 * time.Second
+	if interactive {
+		timeout = 120 * time.Second
+	}
+
+	if err := pm.WaitForPort(localPort, timeout, exitCh); err != nil {
 		pm.KillProcessTree(cmd)
 		return nil, err
 	}
